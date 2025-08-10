@@ -55,11 +55,39 @@ func (t Transactor) RunQuery(query goobie.QueryAny, strategy goobie.ResultStrate
 	rows, err := t.db.Query(fr.SQL, fr.Args...)
 	return mapQuery(query, strategy, err, rows, resultType)
 }
+
 func (t Transactor) RunUpdate(update goobie.UpdateT) (int64, error) {
-	fr := DatabaseSpecificTransforms(t.db, update.SQL)
+	fragment := goobie.Fragment{SQL: update.GetSQL(), Args: update.GetArgs()}
+	fr := DatabaseSpecificTransforms(t.db, fragment)
 	result, err := t.db.Exec(fr.SQL, fr.Args...)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+func (t *Transactor) RunUpdateMany(update goobie.UpdateT, params [][]any) (int64, error) {
+	fragment := goobie.Fragment{SQL: update.GetSQL(), Args: update.GetArgs()}
+	fr := DatabaseSpecificTransforms(t.db, fragment)
+	
+	// For batch operations, we prepare the SQL without initial args
+	// The args come from the params parameter
+	var r int64 = 0
+	stmt, err := t.db.Prepare(fr.SQL)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, p := range params {
+		result, err := stmt.Exec(p...)
+		if err != nil {
+			return r, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return r, err
+		}
+		r += n
+	}
+	return r, nil
 }

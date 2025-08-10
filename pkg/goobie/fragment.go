@@ -62,8 +62,20 @@ func splitOnPlaceholders(s string) []string {
 }
 
 func (fr Fragment) ToPostgres() Fragment {
+	// Handle case where we have placeholders but no arguments (batch operations)
 	if len(fr.Args) == 0 {
-		return fr
+		// Convert ? placeholders to PostgreSQL $1, $2, etc. format
+		placeholderCount := countPlaceholders(fr.SQL)
+		if placeholderCount == 0 {
+			return fr
+		}
+		
+		newSQL := fr.SQL
+		for i := 1; i <= placeholderCount; i++ {
+			newSQL = strings.Replace(newSQL, "?", "$"+strconv.Itoa(i), 1)
+		}
+		
+		return Fragment{SQL: newSQL, Args: fr.Args}
 	}
 
 	argMap := make(map[any]int)
@@ -80,8 +92,8 @@ func (fr Fragment) ToPostgres() Fragment {
 				newSQL.WriteString("$" + strconv.Itoa(placeholderNum))
 			} else {
 				argMap[arg] = argCount
-				newSQL.WriteString("$" + strconv.Itoa(argCount))
 				uniqueArgs = append(uniqueArgs, arg)
+				newSQL.WriteString("$" + strconv.Itoa(argCount))
 				argCount++
 			}
 		}

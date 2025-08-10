@@ -153,3 +153,13 @@ func TestRetrievingResults(t *testing.T) {
 		t.Errorf("Got: %v, Want: %v", got, want)
 	}
 }
+
+func TestBatchUpdates(t *testing.T) {
+	_, err := BatchUpdates(xa, [][]any{
+		{"Banjo", 25},
+		{"Charlie", 30},
+	})
+	if err != nil {
+		t.Errorf("Error: %v", err)
+	}
+}

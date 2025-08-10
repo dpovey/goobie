@@ -6,29 +6,29 @@ import (
 	"github.com/dpovey/goobie/pkg/stream"
 )
 
-var dropPerson = goobie.Update(`
+var dropPerson = goobie.Update0(`
  DROP TABLE IF EXISTS person
-  `).Update()
+  `)
 
-var createPerson = goobie.Update(`
+var createPerson = goobie.Update0(`
 CREATE TABLE person (
       id   SERIAL,
       name VARCHAR NOT NULL UNIQUE,
       age  SMALLINT
     )
-    `).Update()
+    `)
 
-var dropCountry = goobie.Update(`
+var dropCountry = goobie.Update0(`
 		DROP TABLE IF EXISTS country
-	`).Update()
-var createCountry = goobie.Update(`
+	`)
+var createCountry = goobie.Update0(`
 		CREATE TABLE country (
 			code CHAR(3),
 			name TEXT,
 			population INTEGER,
 			Gnp NUMERIC(10, 2)
 		)
-	`).Update()
+	`)
 
 func DroppingCountryTables(xa goobie.Transactor) error {
 	_, err := dropCountry.Run(xa)
@@ -42,7 +42,7 @@ func CreatingCountryTables(xa goobie.Transactor) error {
 	if err != nil {
 		return err
 	}
-	rows := []goobie.UpdateT{
+	rows := []goobie.UpdateF{
 		goobie.Update("INSERT INTO country (code, name, population, Gnp) VALUES (?, ?, ?, ?)", "USA", "United States", 1000000, 1000000.00),
 		goobie.Update("INSERT INTO country (code, name, population, Gnp) VALUES (?, ?, ?, ?)", "GBR", "United Kingdom", 1000000, 1000000.00),
 		goobie.Update("INSERT INTO country (code, name, population, Gnp) VALUES (?, ?, ?, ?)", "FRA", "France", 1000000, 1000000.00),
@@ -91,15 +91,20 @@ func CreatingPersonTables(xa goobie.Transactor) (int64, error) {
 	return total, nil
 }
 
-func insert1(name string, age *int) goobie.UpdateOp {
+func insert1(name string, age *int) goobie.UpdateF {
 	return goobie.Update(`
 		INSERT INTO person (name, age)
 		VALUES (?, ?)
-	`, name, age).Update()
+	`, name, age)
 }
 
 type Person struct {
 	Id   int64
+	Name string
+	Age  *int
+}
+
+type PersonInfo struct {
 	Name string
 	Age  *int
 }
@@ -146,4 +151,10 @@ func RetrievingResults(xa goobie.Transactor, name string, age int) (Person, erro
 	})
 
 	return result, err
+}
+
+func BatchUpdates(xa goobie.Transactor, updates [][]any) (int64, error) {
+	// Use UpdateF instead of UpdateWithWrite for batch operations
+	updateF := goobie.Update("INSERT INTO person (name, age) VALUES (?, ?)")
+	return xa.RunUpdateMany(updateF, updates)
 }

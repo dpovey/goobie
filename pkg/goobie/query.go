@@ -34,11 +34,23 @@ func QueryFrAndRead[A any](fragment Fragment, reader read.Read[A]) QueryT[A] {
 	}
 }
 
+// Query creates a query that returns values of type A using struct-based scanning.
+// Use this for struct types where you want to scan multiple columns into struct fields.
+// For primitive types (string, int, etc.), use Query0 instead for better performance.
+//
+// Example:
+//   Query[Person]("SELECT id, name, age FROM person")
 func Query[A any](sql string, args ...any) QueryT[A] {
 	return QueryFr[A](Fr(sql, args...))
 }
 
-// Query0 is a convenience function for queries that return a single value.
+// Query0 creates a query that returns values of type A using primitive scanning.
+// Use this for primitive types (string, int, float64, bool, etc.) or when scanning
+// a single column. This avoids reflection overhead for simple types.
+//
+// Example:
+//   Query0[string]("SELECT name FROM person")
+//   Query0[int64]("SELECT COUNT(*) FROM person")
 func Query0[A any](sql string, args ...any) QueryT[A] {
 	return QueryFrAndRead[A](Fr(sql, args...), read.Get[A]{})
 }
@@ -48,21 +60,35 @@ func Query0Fr[A any](fragment Fragment) QueryT[A] {
 }
 
 func QueryFr[A any](fragment Fragment) QueryT[A] {
-	var a A
-	// Check if A is a primitive type or a struct
-	switch any(a).(type) {
-	case interface{}:
-		return QueryFrStruct[A](fragment)
-	default:
-		return Query0Fr[A](fragment)
-	}
+	return QueryFrAndRead[A](fragment, product.NewProduct[A]())
 }
 
-func QueryStruct[T interface{}](sql string, params ...any) QueryT[T] {
-	return QueryFrStruct[T](Fr(sql, params...))
+// Convenience functions for common primitive types
+// These provide a more explicit API for frequently used types
+
+// QueryString is a convenience function for string queries
+func QueryString(sql string, args ...any) QueryT[string] {
+	return Query0[string](sql, args...)
 }
-func QueryFrStruct[T interface{}](fragment Fragment) QueryT[T] {
-	return QueryFrAndRead[T](fragment, product.NewProduct[T]())
+
+// QueryInt is a convenience function for int queries  
+func QueryInt(sql string, args ...any) QueryT[int] {
+	return Query0[int](sql, args...)
+}
+
+// QueryInt64 is a convenience function for int64 queries
+func QueryInt64(sql string, args ...any) QueryT[int64] {
+	return Query0[int64](sql, args...)
+}
+
+// QueryFloat64 is a convenience function for float64 queries
+func QueryFloat64(sql string, args ...any) QueryT[float64] {
+	return Query0[float64](sql, args...)
+}
+
+// QueryBool is a convenience function for bool queries
+func QueryBool(sql string, args ...any) QueryT[bool] {
+	return Query0[bool](sql, args...)
 }
 
 func (q QueryT[A]) ToSlice() Op[[]A] {
@@ -79,7 +105,7 @@ func (q QueryT[A]) ToSlice() Op[[]A] {
 		}
 		return value.Interface().([]A), nil
 	}
-	return Op[[]A]{run}
+	return RunOp[[]A]{run}
 }
 
 func (q QueryT[A]) Unique() Op[A] {
@@ -91,46 +117,47 @@ func (q QueryT[A]) Unique() Op[A] {
 		}
 		return result.(A), nil
 	}
-	return Op[A]{run}
+	return RunOp[A]{run}
 }
 
 func (q QueryT[A]) Option() Op[*A] {
-	var a *A
+	var a A
 	run := func(t Runner) (*A, error) {
 		result, err := t.RunQuery(q, OPTION, reflect.TypeOf(a))
 		if err != nil {
 			return nil, err
 		}
-		return result.(*A), nil
+		if result == nil {
+			return nil, nil
+		}
+		value := result.(A)
+		return &value, nil
 	}
-	return Op[*A]{run}
+	return RunOp[*A]{run}
 }
-
-var a any
 
 func (q QueryT[A]) None() Op[any] {
 	run := func(t Runner) (any, error) {
-		result, err := t.RunQuery(q, EMPTY, reflect.TypeOf(a))
+		result, err := t.RunQuery(q, EMPTY, reflect.TypeOf(q.Read))
 		if err != nil {
 			return nil, err
 		}
 		return result, nil
 	}
-	return Op[any]{run}
+	return RunOp[any]{run}
 }
 
 func (q QueryT[A]) Stream() Op[stream.Stream[A]] {
 	var a A
-	var resultType = reflect.TypeOf(a)
 	run := func(t Runner) (stream.Stream[A], error) {
-		result, err := t.RunQuery(q, STREAM, resultType)
+		result, err := t.RunQuery(q, STREAM, reflect.TypeOf(a))
 		if err != nil {
-			// Shouldn't happen, but in case
 			return stream.Fail[A](err), err
 		}
-		return stream.UnsafeCast[A](result.(stream.Stream[any])), nil
+		anyStream := result.(stream.Stream[any])
+		return stream.UnsafeCast[A](anyStream), nil
 	}
-	return Op[stream.Stream[A]]{run}
+	return RunOp[stream.Stream[A]]{run}
 }
 
 //func (q QueryT[A]) Check() Op[bool] {
