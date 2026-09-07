@@ -1,26 +1,19 @@
 package goobie
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"sync"
+
 	"github.com/dpovey/goobie/pkg/goobie/product"
 	"github.com/dpovey/goobie/pkg/goobie/read"
 	"github.com/dpovey/goobie/pkg/stream"
-	"reflect"
 )
-
-// QueryAny is needed to work around limitations in the go type system.
-type QueryAny interface {
-	ReadAny() read.ReadAny
-	SQL() Fragment
-}
 
 type QueryT[A any] struct {
 	Read read.Read[A]
 	sql  Fragment
-}
-
-func (q QueryT[A]) ReadAny() read.ReadAny {
-	return read.ToReadAny(q.Read)
 }
 
 func (q QueryT[A]) SQL() Fragment {
@@ -39,7 +32,8 @@ func QueryFrAndRead[A any](fragment Fragment, reader read.Read[A]) QueryT[A] {
 // For primitive types (string, int, etc.), use Query0 instead for better performance.
 //
 // Example:
-//   Query[Person]("SELECT id, name, age FROM person")
+//
+//	Query[Person]("SELECT id, name, age FROM person")
 func Query[A any](sql string, args ...any) QueryT[A] {
 	return QueryFr[A](Fr(sql, args...))
 }
@@ -49,18 +43,21 @@ func Query[A any](sql string, args ...any) QueryT[A] {
 // a single column. This avoids reflection overhead for simple types.
 //
 // Example:
-//   Query0[string]("SELECT name FROM person")
-//   Query0[int64]("SELECT COUNT(*) FROM person")
+//
+//	Query0[string]("SELECT name FROM person")
+//	Query0[int64]("SELECT COUNT(*) FROM person")
 func Query0[A any](sql string, args ...any) QueryT[A] {
-	return QueryFrAndRead[A](Fr(sql, args...), read.Get[A]{})
+	return QueryFrAndRead[A](Fr(sql, args...), read.Get[A]())
 }
 
 func Query0Fr[A any](fragment Fragment) QueryT[A] {
-	return QueryFrAndRead[A](fragment, read.Get[A]{})
+	return QueryFrAndRead[A](fragment, read.Get[A]())
 }
 
 func QueryFr[A any](fragment Fragment) QueryT[A] {
-	return QueryFrAndRead[A](fragment, product.NewProduct[A]())
+	return QueryFrAndRead[A](fragment, read.NewReader(func(scan read.RowScan) (A, error) {
+		return product.NewProduct[A]().Read(scan)
+	}))
 }
 
 // Convenience functions for common primitive types
@@ -71,7 +68,7 @@ func QueryString(sql string, args ...any) QueryT[string] {
 	return Query0[string](sql, args...)
 }
 
-// QueryInt is a convenience function for int queries  
+// QueryInt is a convenience function for int queries
 func QueryInt(sql string, args ...any) QueryT[int] {
 	return Query0[int](sql, args...)
 }
@@ -92,76 +89,140 @@ func QueryBool(sql string, args ...any) QueryT[bool] {
 }
 
 func (q QueryT[A]) ToSlice() Op[[]A] {
-	var a A
-	resultType := reflect.TypeOf(a)
-	run := func(t Runner) ([]A, error) {
-		result, err := t.RunQuery(q, SLICE, resultType)
+	run := func(t Runner) (result []A, err error) {
+		rows, err := t.Query(q.sql)
 		if err != nil {
 			return nil, err
 		}
-		value := result.(reflect.Value)
-		if value.Kind() != reflect.Slice {
-			return nil, fmt.Errorf("Expected slice, got %v", value.Kind())
-		}
-		return value.Interface().([]A), nil
-	}
-	return RunOp[[]A]{run}
-}
+		defer func() {
+			err = errors.Join(err, rows.Close())
+		}()
 
-func (q QueryT[A]) Unique() Op[A] {
-	var a A
-	run := func(t Runner) (A, error) {
-		result, err := t.RunQuery(q, UNIQUE, reflect.TypeOf(a))
-		if err != nil {
-			return a, err
+		result = make([]A, 0)
+		for rows.Next() {
+			value, err := q.Read.Read(rows.Scan)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, value)
 		}
-		return result.(A), nil
-	}
-	return RunOp[A]{run}
-}
-
-func (q QueryT[A]) Option() Op[*A] {
-	var a A
-	run := func(t Runner) (*A, error) {
-		result, err := t.RunQuery(q, OPTION, reflect.TypeOf(a))
-		if err != nil {
-			return nil, err
-		}
-		if result == nil {
-			return nil, nil
-		}
-		value := result.(A)
-		return &value, nil
-	}
-	return RunOp[*A]{run}
-}
-
-func (q QueryT[A]) None() Op[any] {
-	run := func(t Runner) (any, error) {
-		result, err := t.RunQuery(q, EMPTY, reflect.TypeOf(q.Read))
-		if err != nil {
+		if err := rows.Err(); err != nil {
 			return nil, err
 		}
 		return result, nil
 	}
-	return RunOp[any]{run}
+	return NewOp(run)
+}
+
+func (q QueryT[A]) Unique() Op[A] {
+	run := func(t Runner) (result A, err error) {
+		var zero A
+		rows, err := t.Query(q.sql)
+		if err != nil {
+			return zero, err
+		}
+		defer func() {
+			err = errors.Join(err, rows.Close())
+		}()
+
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return zero, err
+			}
+			return zero, fmt.Errorf("expected at least one result")
+		}
+		result, err = q.Read.Read(rows.Scan)
+		if err != nil {
+			return zero, err
+		}
+		if rows.Next() {
+			return zero, fmt.Errorf("multiple rows found")
+		}
+		if err := rows.Err(); err != nil {
+			return zero, err
+		}
+		return result, nil
+	}
+	return NewOp(run)
+}
+
+func (q QueryT[A]) Option() Op[*A] {
+	run := func(t Runner) (result *A, err error) {
+		rows, err := t.Query(q.sql)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			err = errors.Join(err, rows.Close())
+		}()
+
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		value, err := q.Read.Read(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		if rows.Next() {
+			return nil, fmt.Errorf("multiple rows found")
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return &value, nil
+	}
+	return NewOp(run)
+}
+
+func (q QueryT[A]) None() Op[any] {
+	run := func(t Runner) (result any, err error) {
+		rows, err := t.Query(q.sql)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			err = errors.Join(err, rows.Close())
+		}()
+
+		if rows.Next() {
+			return nil, fmt.Errorf("expected no results")
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return NewOp(run)
 }
 
 func (q QueryT[A]) Stream() Op[stream.Stream[A]] {
-	var a A
 	run := func(t Runner) (stream.Stream[A], error) {
-		result, err := t.RunQuery(q, STREAM, reflect.TypeOf(a))
+		rows, err := t.Query(q.sql)
 		if err != nil {
 			return stream.Fail[A](err), err
 		}
-		anyStream := result.(stream.Stream[any])
-		return stream.UnsafeCast[A](anyStream), nil
+		closeRows := sync.OnceValue(rows.Close)
+		next := func(context.Context) ([]A, bool, error) {
+			chunk := make([]A, 0, 1024)
+			for rows.Next() {
+				value, err := q.Read.Read(rows.Scan)
+				if err != nil {
+					return nil, false, errors.Join(err, closeRows())
+				}
+				chunk = append(chunk, value)
+				if len(chunk) == cap(chunk) {
+					return chunk, true, nil
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return nil, false, errors.Join(err, closeRows())
+			}
+			return chunk, false, closeRows()
+		}
+		return stream.FromNextChunkFuncWithClose(next, closeRows), nil
 	}
-	return RunOp[stream.Stream[A]]{run}
+	return NewOp(run)
 }
-
-//func (q QueryT[A]) Check() Op[bool] {
-//	run := func(t Runner) (bool, error) {
-//		_, err := t.RunCheck(any(q).(QueryT[any]), CHECK)
-//	}
-//}

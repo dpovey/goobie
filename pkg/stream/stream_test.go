@@ -140,25 +140,73 @@ func TestTake(t *testing.T) {
 	}
 }
 
+func TestTakeClosesUpstream(t *testing.T) {
+	closed := 0
+	s := FromNextChunkFuncWithClose(
+		func(context.Context) ([]int, bool, error) {
+			return []int{1, 2, 3}, true, nil
+		},
+		func() error {
+			closed++
+			return nil
+		},
+	)
+
+	result, err := s.Take(2).Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Take().Collect() error = %v", err)
+	}
+	if !reflect.DeepEqual(result, []int{1, 2}) {
+		t.Fatalf("Take().Collect() = %v, want [1 2]", result)
+	}
+	if closed != 1 {
+		t.Fatalf("close called %d times, want 1", closed)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("close called %d times after second Close, want 1", closed)
+	}
+}
+
+func TestTakePreservesChunkWhenCloseFails(t *testing.T) {
+	closeErr := errors.New("close failed")
+	s := FromNextChunkFuncWithClose(
+		func(context.Context) ([]int, bool, error) {
+			return []int{1, 2}, true, nil
+		},
+		func() error { return closeErr },
+	)
+
+	result, err := s.Take(1).Collect(context.Background())
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("Take().Collect() error = %v, want %v", err, closeErr)
+	}
+	if !reflect.DeepEqual(result, []int{1}) {
+		t.Fatalf("Take().Collect() = %v, want [1]", result)
+	}
+}
+
 func TestMap(t *testing.T) {
 	s := FromSlice([]int{1, 2, 3})
-	s = Map(s, func(x int) int { return x * 2 })
+	mapped := s.Map(func(x int) string { return fmt.Sprintf("item-%d", x) })
 
-	chunk, hasNext, err := s.Next(context.Background())
+	chunk, hasNext, err := mapped.Next(context.Background())
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if hasNext {
 		t.Fatal("Expected ok to be false")
 	}
-	if !reflect.DeepEqual(chunk, []int{2, 4, 6}) {
-		t.Fatalf("Expected [2, 4, 6], got %v", chunk)
+	if !reflect.DeepEqual(chunk, []string{"item-1", "item-2", "item-3"}) {
+		t.Fatalf("Expected [item-1 item-2 item-3], got %v", chunk)
 	}
 }
 
 func TestFilter(t *testing.T) {
 	s := FromSlice([]int{1, 2, 3, 4, 5})
-	s = Filter(s, func(x int) bool { return x%2 == 0 })
+	s = s.Filter(func(x int) bool { return x%2 == 0 })
 
 	chunk, hasNext, err := s.Next(context.Background())
 	if err != nil {
@@ -172,16 +220,16 @@ func TestFilter(t *testing.T) {
 	}
 }
 
-func ignoreTestFlatMap(t *testing.T) {
+func TestFlatMap(t *testing.T) {
 	s := FromSlice([]int{1, 2})
-	s = FlatMap(s, func(x int) Stream[int] { return FromSlice([]int{x, x * 10}) })
+	s = s.FlatMap(func(x int) Stream[int] { return FromSlice([]int{x, x * 10}) })
 
 	chunk, hasNext, err := s.Next(context.Background())
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if hasNext {
-		t.Fatal("Expected ok to be false")
+	if !hasNext {
+		t.Fatal("Expected hasNext to be true")
 	}
 	if !reflect.DeepEqual(chunk, []int{1, 10}) {
 		t.Fatalf("Expected [1, 10], got %v", chunk)
@@ -192,7 +240,7 @@ func ignoreTestFlatMap(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if hasNext {
-		t.Fatal("Expected ok to be true")
+		t.Fatal("Expected hasNext to be false")
 	}
 	if !reflect.DeepEqual(chunk, []int{2, 20}) {
 		t.Fatalf("Expected [2, 20], got %v", chunk)
@@ -213,7 +261,7 @@ func TestCollect(t *testing.T) {
 func TestZipWith(t *testing.T) {
 	s1 := FromSlice([]int{1, 2, 3})
 	s2 := FromSlice([]string{"a", "b", "c"})
-	s := ZipWith(s1, s2, func(x int, y string) string { return fmt.Sprintf("%d%s", x, y) })
+	s := s1.ZipWith(s2, func(x int, y string) string { return fmt.Sprintf("%d%s", x, y) })
 
 	chunk, hasNext, err := s.Next(context.Background())
 	if err != nil {
@@ -229,7 +277,7 @@ func TestZipWith(t *testing.T) {
 
 func TestParMap(t *testing.T) {
 	s := FromSlice([]int{1, 2, 3, 4, 5})
-	s = ParMap(s, 2, func(x int) (int, error) { return x * 2, nil })
+	s = s.ParMap(2, func(x int) (int, error) { return x * 2, nil })
 
 	chunk, hasNext, err := s.Next(context.Background())
 	if err != nil {

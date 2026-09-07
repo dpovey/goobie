@@ -21,7 +21,7 @@ type typeInfo struct {
 // Product is an interface for a "Product" type that consists of
 // a number of fields.  Instances of Product can support a
 type Product[A any] interface {
-	read.Read[A]
+	Read(read.RowScan) (A, error)
 	Value() A
 	Values() []any
 	Mutate() []any

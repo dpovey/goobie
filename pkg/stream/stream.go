@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 )
@@ -11,7 +12,14 @@ import (
 // The implementation encapsulates a NextChunk function which returns items.
 type Stream[A any] struct {
 	// next is the underlying NextChunk that produces data for this Stream
-	next NextChunk[A]
+	next   NextChunk[A]
+	closer *closeState
+}
+
+type closeState struct {
+	once sync.Once
+	fn   func() error
+	err  error
 }
 
 // NextChunk represents a function that, when run, produces a chunk of data, a boolean indicating
@@ -26,6 +34,10 @@ type NextChunk[A any] struct {
 
 func New[A any](p NextChunk[A]) Stream[A] {
 	return Stream[A]{next: p}
+}
+
+func newDerived[A any](p NextChunk[A], closer *closeState) Stream[A] {
+	return Stream[A]{next: p, closer: closer}
 }
 func Fail[A any](err error) Stream[A] {
 	return New(NextChunk[A]{
@@ -55,6 +67,17 @@ func FromNextChunkFunc[A any](f func(context.Context) ([]A, bool, error)) Stream
 	return New(NextChunk[A]{run: f})
 }
 
+// FromNextChunkFuncWithClose creates a stream that releases a resource when closed.
+func FromNextChunkFuncWithClose[A any](
+	f func(context.Context) ([]A, bool, error),
+	closeFn func() error,
+) Stream[A] {
+	return Stream[A]{
+		next:   NextChunk[A]{run: f},
+		closer: &closeState{fn: closeFn},
+	}
+}
+
 func Empty[A any]() Stream[A] {
 	return New(NextChunk[A]{
 		run: func(context.Context) ([]A, bool, error) {
@@ -74,39 +97,50 @@ func NewPull[A any](f func(context.Context) ([]A, bool, error)) NextChunk[A] {
 func (s Stream[A]) Next(ctx context.Context) ([]A, bool, error) {
 	select {
 	case <-ctx.Done():
+		_ = s.Close()
 		return nil, false, ctx.Err()
 	default:
 		return s.next.run(ctx)
 	}
 }
 
+// Close releases resources owned by the stream. It is safe to call more than once.
+func (s Stream[A]) Close() error {
+	if s.closer == nil {
+		return nil
+	}
+	s.closer.once.Do(func() {
+		s.closer.err = s.closer.fn()
+	})
+	return s.closer.err
+}
+
 func (s Stream[A]) Take(n int) Stream[A] {
 	remaining := n
-	return New(NextChunk[A]{
+	return newDerived(NextChunk[A]{
 		run: func(ctx context.Context) ([]A, bool, error) {
-			var result []A
-			for remaining > 0 {
-				chunk, hasNext, err := s.Next(ctx)
-				if err != nil {
-					return result, hasNext, err
-				}
-				if len(chunk) > remaining {
-					result = append(result, chunk[:remaining]...)
-					remaining = 0
-				} else {
-					result = append(result, chunk...)
-					remaining -= len(chunk)
-				}
-				if !hasNext || len(result) > 0 {
-					return result, false, nil
-				}
+			if remaining <= 0 {
+				return nil, false, s.Close()
 			}
-			return nil, false, nil
+			chunk, hasNext, err := s.Next(ctx)
+			if len(chunk) > remaining {
+				chunk = chunk[:remaining]
+			}
+			remaining -= len(chunk)
+			if err != nil {
+				return chunk, false, errors.Join(err, s.Close())
+			}
+			if remaining == 0 || !hasNext {
+				return chunk, false, s.Close()
+			}
+			return chunk, true, nil
 		},
-	})
+	}, s.closer)
 }
 
 func (s Stream[A]) ForEach(ctx context.Context, f func(A)) {
+	defer s.Close()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -114,55 +148,54 @@ func (s Stream[A]) ForEach(ctx context.Context, f func(A)) {
 		default:
 		}
 		chunk, ok, err := s.Next(ctx)
-		if !ok || err != nil {
-			return
-		}
 		for _, a := range chunk {
 			f(a)
+		}
+		if !ok || err != nil {
+			return
 		}
 	}
 }
 
 func (s Stream[A]) Collect(ctx context.Context) ([]A, error) {
+	defer s.Close()
+
 	result := make([]A, 0)
 	for {
 		chunk, hasNext, err := s.Next(ctx)
+		result = append(result, chunk...)
 		if err != nil {
 			return result, err
 		}
-		result = append(result, chunk...)
 		if !hasNext {
 			return result, nil
 		}
 	}
 }
 
-func Map[A any, B any](s Stream[A], f func(A) B) Stream[B] {
-	return New(NextChunk[B]{
+func (s Stream[A]) Map[B any](f func(A) B) Stream[B] {
+	return newDerived(NextChunk[B]{
 		run: func(ctx context.Context) ([]B, bool, error) {
 			chunk, hasNext, err := s.Next(ctx)
-			if err != nil {
-				return nil, hasNext, err
-			}
 			result := make([]B, len(chunk))
 			for i, a := range chunk {
 				result[i] = f(a)
 			}
 			return result, hasNext, err
 		},
-	})
+	}, s.closer)
 }
 
 // UnsafeCast maps a stream of any to a stream of a specific type.
-// This function is unsafe and can cause runtime panics.
-func UnsafeCast[A any](s Stream[any]) Stream[A] {
-	return Map(s, func(a any) A {
-		return a.(A)
+// This method is unsafe and can cause runtime panics.
+func (s Stream[A]) UnsafeCast[B any]() Stream[B] {
+	return s.Map(func(a A) B {
+		return any(a).(B)
 	})
 }
 
-func MapError[A any](s Stream[A], f func(error) error) Stream[A] {
-	return New(NextChunk[A]{
+func (s Stream[A]) MapError(f func(error) error) Stream[A] {
+	return newDerived(NextChunk[A]{
 		run: func(ctx context.Context) ([]A, bool, error) {
 			chunk, ok, err := s.Next(ctx)
 			if !ok || err != nil {
@@ -170,68 +203,71 @@ func MapError[A any](s Stream[A], f func(error) error) Stream[A] {
 			}
 			return chunk, ok, nil
 		},
-	})
+	}, s.closer)
 }
 
-func FlatMap[A any, B any](s Stream[A], f func(A) Stream[B]) Stream[B] {
+func (s Stream[A]) FlatMap[B any](f func(A) Stream[B]) Stream[B] {
 	var innerStream Stream[B]
+	var pending []A
+	var outerDone bool
+	var outerErr error
+	closer := &closeState{fn: func() error {
+		err := s.Close()
+		if innerErr := innerStream.Close(); err == nil {
+			err = innerErr
+		}
+		return err
+	}}
 
-	return New(NextChunk[B]{
+	return newDerived(NextChunk[B]{
 		run: func(ctx context.Context) ([]B, bool, error) {
 			for {
-				// If we have an inner stream, try to get elements from it
 				if innerStream.next.run != nil {
 					chunk, hasNext, err := innerStream.Next(ctx)
-					if err != nil {
-						return nil, hasNext, err
+					if !hasNext {
+						err = errors.Join(err, innerStream.Close())
+						innerStream = Stream[B]{}
 					}
 					if len(chunk) > 0 {
-						return chunk, hasNext, nil
+						more := hasNext || len(pending) > 0 || !outerDone
+						if !more {
+							err = errors.Join(err, outerErr)
+							outerErr = nil
+						}
+						return chunk, more, err
 					}
-					if !hasNext {
-						// Inner stream is exhausted, clear it
-						innerStream = Stream[B]{}
+					if err != nil {
+						return nil, false, errors.Join(err, outerErr)
 					}
 				}
 
-				// Get the next chunk from the outer stream
-				chunkA, hasNext, err := s.Next(ctx)
-				if err != nil {
-					return nil, hasNext, err
-				}
-				if len(chunkA) == 0 && !hasNext {
-					return nil, hasNext, nil
+				if len(pending) > 0 {
+					next := pending[0]
+					pending = pending[1:]
+					innerStream = f(next)
+					continue
 				}
 
-				// Find the first non-empty inner stream
-				for _, a := range chunkA {
-					innerStream = f(a)
-					chunk, hasNext, err := innerStream.Next(ctx)
-					if err != nil {
-						return nil, hasNext, err
-					}
-					if len(chunk) > 0 {
-						return chunk, hasNext, nil
-					}
-					if !hasNext {
-						// Inner stream is exhausted, clear it
-						innerStream = Stream[B]{}
-					}
+				if outerDone {
+					err := outerErr
+					outerErr = nil
+					return nil, false, err
 				}
-				// If we've processed all elements and found no results, continue to the next outer chunk
+
+				chunk, hasNext, err := s.Next(ctx)
+				pending = chunk
+				outerDone = !hasNext || err != nil
+				outerErr = err
 			}
 		},
-	})
+	}, closer)
 }
 
-func Filter[A any](s Stream[A], pred func(A) bool) Stream[A] {
-	return New(NextChunk[A]{
+func (s Stream[A]) Filter(pred func(A) bool) Stream[A] {
+	return newDerived(NextChunk[A]{
 		run: func(ctx context.Context) ([]A, bool, error) {
 			for {
 				chunk, hasNext, err := s.Next(ctx)
-				if err != nil {
-					return nil, hasNext, err
-				}
 				result := make([]A, 0, len(chunk))
 				for _, a := range chunk {
 					if pred(a) {
@@ -241,57 +277,70 @@ func Filter[A any](s Stream[A], pred func(A) bool) Stream[A] {
 				return result, hasNext, err
 			}
 		},
-	})
+	}, s.closer)
 }
 
-func ToMap[A any, K comparable, V any](s Stream[A], ctx context.Context, keyValue func(A) (K, V)) (map[K]V, error) {
+func (s Stream[A]) ToMap[K comparable, V any](ctx context.Context, keyValue func(A) (K, V)) (map[K]V, error) {
+	defer s.Close()
+
 	result := make(map[K]V)
 	for {
 		chunk, hasNext, err := s.Next(ctx)
-		if err != nil {
-			return result, err
-		}
 		for _, a := range chunk {
 			key, value := keyValue(a)
 			result[key] = value
+		}
+		if err != nil {
+			return result, err
 		}
 		if !hasNext {
 			return result, nil
 		}
 	}
 }
-func Fold[A any, B any](s Stream[A], ctx context.Context, z B, f func(B, A) B) B {
+func (s Stream[A]) Fold[B any](ctx context.Context, z B, f func(B, A) B) B {
+	defer s.Close()
+
 	acc := z
 	for {
 		chunk, ok, err := s.Next(ctx)
-		if !ok || err != nil {
-			return acc
-		}
 		for _, a := range chunk {
 			acc = f(acc, a)
 		}
-	}
-}
-
-func FoldChunksLeft[A any, B any, E error](s Stream[A], ctx context.Context, z B, f func(B, []A) B) B {
-	acc := z
-	for {
-		chunk, ok, err := s.Next(ctx)
 		if !ok || err != nil {
 			return acc
 		}
-		acc = f(acc, chunk)
 	}
 }
 
-func ZipWith[A any, B any, C any](s1 Stream[A], s2 Stream[B], f func(A, B) C) Stream[C] {
-	return New(NextChunk[C]{
+func (s Stream[A]) FoldChunksLeft[B any](ctx context.Context, z B, f func(B, []A) B) B {
+	defer s.Close()
+
+	acc := z
+	for {
+		chunk, ok, err := s.Next(ctx)
+		acc = f(acc, chunk)
+		if !ok || err != nil {
+			return acc
+		}
+	}
+}
+
+func (s Stream[A]) ZipWith[B any, C any](other Stream[B], f func(A, B) C) Stream[C] {
+	closer := &closeState{fn: func() error {
+		err := s.Close()
+		if otherErr := other.Close(); err == nil {
+			err = otherErr
+		}
+		return err
+	}}
+	return newDerived(NextChunk[C]{
 		run: func(ctx context.Context) ([]C, bool, error) {
-			chunkA, okA, errA := s1.Next(ctx)
+			chunkA, okA, errA := s.Next(ctx)
 			if errA != nil {
 				return nil, okA, errA
 			}
-			chunkB, okB, errB := s2.Next(ctx)
+			chunkB, okB, errB := other.Next(ctx)
 			if errB != nil {
 				return nil, okB, errB
 			}
@@ -307,16 +356,13 @@ func ZipWith[A any, B any, C any](s1 Stream[A], s2 Stream[B], f func(A, B) C) St
 			}
 			return result, okA && okB, nil
 		},
-	})
+	}, closer)
 }
 
-func ParMap[A any, B any](s Stream[A], concurrency int, f func(A) (B, error)) Stream[B] {
-	return New(NextChunk[B]{
+func (s Stream[A]) ParMap[B any](concurrency int, f func(A) (B, error)) Stream[B] {
+	return newDerived(NextChunk[B]{
 		run: func(ctx context.Context) ([]B, bool, error) {
 			chunk, hasNext, err := s.Next(ctx)
-			if err != nil {
-				return nil, hasNext, err
-			}
 
 			result := make([]B, len(chunk))
 			var wg sync.WaitGroup
@@ -347,9 +393,9 @@ func ParMap[A any, B any](s Stream[A], concurrency int, f func(A) (B, error)) St
 				return nil, false, err // Type assertion, be cautious
 			}
 
-			return result, hasNext, nil
+			return result, hasNext, err
 		},
-	})
+	}, s.closer)
 }
 
 func Bracket[A any, R any](

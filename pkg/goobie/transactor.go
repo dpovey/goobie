@@ -1,10 +1,16 @@
 package goobie
 
-import "reflect"
+// Rows is the minimal row cursor required by typed query decoders.
+type Rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close() error
+}
 
 // Runner the base interface for Transactor and Transaction.
 type Runner interface {
-	RunQuery(query QueryAny, strategy ResultStrategy, resultType reflect.Type) (any, error)
+	Query(Fragment) (Rows, error)
 	RunUpdate(update UpdateT) (int64, error)
 	RunUpdateMany(update UpdateT, params [][]any) (int64, error)
 }
@@ -21,13 +27,3 @@ type Transaction interface {
 	Commit() error
 	Rollback() error
 }
-
-type ResultStrategy int
-
-const (
-	EMPTY ResultStrategy = iota
-	UNIQUE
-	OPTION
-	SLICE
-	STREAM
-)

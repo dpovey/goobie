@@ -26,6 +26,10 @@ func (u UpdateF) Run(runner Runner) (int64, error) {
 	return runner.RunUpdate(u)
 }
 
+func (u UpdateF) Op() Op[int64] {
+	return NewOp(u.Run)
+}
+
 type Writer[A any] func(A) ([]any, error)
 
 type UpdateWithWrite[A any] struct {
@@ -42,7 +46,7 @@ func (u UpdateWithWrite[A]) GetArgs() []any {
 	if len(u.Values) == 0 {
 		return []any{}
 	}
-	
+
 	// Use the writer to convert the first value to args
 	args, err := u.Writer(u.Values[0])
 	if err != nil {
@@ -55,16 +59,11 @@ func NewUpdateT[A any](sql string, values ...A) UpdateWithWrite[A] {
 	return UpdateWithWrite[A]{SQL: sql, Writer: write.Writer[A](), Values: values}
 }
 
-type UpdateOp[A any] struct {
-	run RunFn[A]
-}
+// UpdateOp is retained as an alias for compatibility.
+type UpdateOp[A any] = Op[A]
 
-func NewUpdateOp[A any](run RunFn[A]) UpdateOp[A] {
-	return UpdateOp[A]{run}
-}
-
-func (u UpdateOp[A]) Run(runner Runner) (A, error) {
-	return u.run(runner)
+func NewUpdateOp[A any](run RunFn[A]) Op[A] {
+	return NewOp(run)
 }
 
 func Update(sql string, args ...any) UpdateF {
@@ -75,19 +74,19 @@ func Update0(sql string) UpdateF {
 	return UpdateFr(Fr(sql))
 }
 
-func UpdateAll(ops ...UpdateF) UpdateOp[int64] {
+func UpdateAll(ops ...UpdateF) Op[int64] {
 	var run RunFn[int64] = func(runner Runner) (int64, error) {
 		var total int64
 		for _, op := range ops {
 			n, err := runner.RunUpdate(op)
 			if err != nil {
-				return 0, err
+				return total, err
 			}
 			total += n
 		}
 		return total, nil
 	}
-	return UpdateOp[int64]{run}
+	return NewOp(run)
 }
 
 func UpdateFr(fragment Fragment) UpdateF {
@@ -98,7 +97,11 @@ func (u UpdateWithWrite[A]) Run(runner Runner) (int64, error) {
 	return runner.RunUpdate(u)
 }
 
-func (u UpdateWithWrite[A]) Update() UpdateOp[int64] {
+func (u UpdateWithWrite[A]) Op() Op[int64] {
+	return NewOp(u.Run)
+}
+
+func (u UpdateWithWrite[A]) Update() Op[int64] {
 	return NewUpdateOp(func(runner Runner) (int64, error) {
 		return u.Run(runner)
 	})

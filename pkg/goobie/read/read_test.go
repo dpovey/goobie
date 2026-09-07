@@ -2,6 +2,7 @@ package read
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -30,80 +31,35 @@ func mockRowScan(values ...any) RowScan {
 }
 
 func TestGet(t *testing.T) {
-	tests := []struct {
-		name     string
-		get      ReadAny
-		scanFunc RowScan
-		want     any
-		wantErr  bool
-	}{
-		{
-			name:     "Get Int",
-			get:      Get[int]{},
-			scanFunc: mockRowScan(42),
-			want:     42,
-			wantErr:  false,
-		},
-		{
-			name:     "Get String",
-			get:      Get[string]{},
-			scanFunc: mockRowScan("hello"),
-			want:     "hello",
-			wantErr:  false,
-		},
-		{
-			name: "Get Error",
-			get:  Get[int]{},
-			scanFunc: func(...any) error {
-				return errors.New("scan error")
-			},
-			want:    0,
-			wantErr: true,
-		},
+	gotInt, err := Get[int]().Read(mockRowScan(42))
+	if err != nil || gotInt != 42 {
+		t.Fatalf("Get[int]().Read() = %v, %v; want 42, nil", gotInt, err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.get.ReadAny(tt.scanFunc)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Get.Values() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Get.Values() = %v, want %v", got, tt.want)
-			}
-		})
+	gotString, err := Get[string]().Read(mockRowScan("hello"))
+	if err != nil || gotString != "hello" {
+		t.Fatalf("Get[string]().Read() = %v, %v; want hello, nil", gotString, err)
+	}
+
+	expectedErr := errors.New("scan error")
+	_, err = Get[int]().Read(func(...any) error { return expectedErr })
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("Get[int]().Read() error = %v, want %v", err, expectedErr)
 	}
 }
 
 func TestMap(t *testing.T) {
-	intReader := Get[int]{}
-	doubleInt := func(i int) int { return i * 2 }
-	mappedReader := Map(intReader, doubleInt)
+	intReader := Get[int]()
+	formatInt := func(i int) string { return fmt.Sprintf("value-%d", i) }
+	mappedReader := intReader.Map(formatInt)
 
 	got, err := mappedReader.Read(mockRowScan(21))
 	if err != nil {
 		t.Errorf("Map() error = %v", err)
 		return
 	}
-	if got != 42 {
-		t.Errorf("Map() = %v, want %v", got, 42)
-	}
-}
-
-func TestCombine(t *testing.T) {
-	intReader := Get[int]{}
-	stringReader := Get[string]{}
-	combinedReader := Combine(intReader, stringReader)
-
-	got, err := combinedReader.Read(mockRowScan(42, "hello"))
-	if err != nil {
-		t.Errorf("Combine() error = %v", err)
-		return
-	}
-	want := []any{42, "hello"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Combine() = %v, want %v", got, want)
+	if got != "value-21" {
+		t.Errorf("Map() = %v, want %v", got, "value-21")
 	}
 }
 
@@ -120,39 +76,30 @@ type NestedStruct struct {
 
 func TestPredefinedReaders(t *testing.T) {
 	now := time.Now()
-	tests := []struct {
-		name   string
-		reader ReadAny
-		input  any
-		want   any
-	}{
-		{"IntRead", IntRead, 42, 42},
-		{"Int8Read", Int8Read, int8(8), int8(8)},
-		{"Int16Read", Int16Read, int16(16), int16(16)},
-		{"Int32Read", Int32Read, int32(32), int32(32)},
-		{"Int64Read", Int64Read, int64(64), int64(64)},
-		{"UintRead", UintRead, uint(42), uint(42)},
-		{"Uint8Read", Uint8Read, uint8(8), uint8(8)},
-		{"Uint16Read", Uint16Read, uint16(16), uint16(16)},
-		{"Uint32Read", Uint32Read, uint32(32), uint32(32)},
-		{"Uint64Read", Uint64Read, uint64(64), uint64(64)},
-		{"Float32Read", Float32Read, float32(3.14), float32(3.14)},
-		{"Float64Read", Float64Read, 3.14, 3.14},
-		{"BoolRead", BoolRead, true, true},
-		{"StringRead", StringRead, "hello", "hello"},
-		{"TimeRead", TimeRead, now, now},
-	}
+	assertRead(t, "IntRead", IntRead, 42)
+	assertRead(t, "Int8Read", Int8Read, int8(8))
+	assertRead(t, "Int16Read", Int16Read, int16(16))
+	assertRead(t, "Int32Read", Int32Read, int32(32))
+	assertRead(t, "Int64Read", Int64Read, int64(64))
+	assertRead(t, "UintRead", UintRead, uint(42))
+	assertRead(t, "Uint8Read", Uint8Read, uint8(8))
+	assertRead(t, "Uint16Read", Uint16Read, uint16(16))
+	assertRead(t, "Uint32Read", Uint32Read, uint32(32))
+	assertRead(t, "Uint64Read", Uint64Read, uint64(64))
+	assertRead(t, "Float32Read", Float32Read, float32(3.14))
+	assertRead(t, "Float64Read", Float64Read, 3.14)
+	assertRead(t, "BoolRead", BoolRead, true)
+	assertRead(t, "StringRead", StringRead, "hello")
+	assertRead(t, "TimeRead", TimeRead, now)
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.reader.ReadAny(mockRowScan(tt.input))
-			if err != nil {
-				t.Errorf("%s.Values() error = %v", tt.name, err)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("%s.Values() = %v, want %v", tt.name, got, tt.want)
-			}
-		})
+func assertRead[T any](t *testing.T, name string, reader Read[T], want T) {
+	t.Helper()
+	got, err := reader.Read(mockRowScan(want))
+	if err != nil {
+		t.Fatalf("%s.Read() error = %v", name, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s.Read() = %v, want %v", name, got, want)
 	}
 }

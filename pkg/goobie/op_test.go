@@ -2,7 +2,6 @@ package goobie
 
 import (
 	"errors"
-	"reflect"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ type mockOpRunner struct {
 	errors  map[string]error
 }
 
-func (m *mockOpRunner) RunQuery(query QueryAny, strategy ResultStrategy, resultType reflect.Type) (any, error) {
+func (m *mockOpRunner) Query(Fragment) (Rows, error) {
 	return nil, errors.New("not implemented in mock")
 }
 
@@ -31,10 +30,10 @@ func TestRunOp_Run(t *testing.T) {
 			return "success", nil
 		},
 	}
-	
+
 	runner := &mockOpRunner{}
 	_, err := op.Run(runner)
-	
+
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -48,42 +47,34 @@ func TestRunOp_RunError(t *testing.T) {
 			return "", expectedErr
 		},
 	}
-	
+
 	runner := &mockOpRunner{}
 	_, err := op.Run(runner)
-	
+
 	if err != expectedErr {
 		t.Errorf("Expected error %v, got %v", expectedErr, err)
 	}
 }
 
 func TestRunOp_Map(t *testing.T) {
-	// Create an op that returns an int
 	intOp := RunOp[int]{
 		run: func(runner Runner) (int, error) {
 			return 42, nil
 		},
 	}
-	
-	// Map it to a string using FlatMap (since there's no simple Map function)
-	stringOp := FlatMap(intOp, func(i int) Op[string] {
-		return RunOp[string]{
-			run: func(runner Runner) (string, error) {
-				return "Number: " + string(rune(i+'0')), nil
-			},
-		}
+
+	stringOp := intOp.Map(func(i int) string {
+		return "Number: " + string(rune(i+'0'))
 	})
-	
+
 	runner := &mockOpRunner{}
-	_, err := stringOp.Run(runner)
-	
+	result, err := stringOp.Run(runner)
+
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
-	
-	// The important thing is that we can compose operations
-	if _, ok := stringOp.(Op[string]); !ok {
-		t.Error("FlatMap should return Op[string]")
+	if result != "Number: Z" {
+		t.Errorf("Map() = %q, want %q", result, "Number: Z")
 	}
 }
 
@@ -95,19 +86,14 @@ func TestRunOp_MapError(t *testing.T) {
 			return 0, expectedErr
 		},
 	}
-	
-	// Map it to a string using FlatMap
-	stringOp := FlatMap(intOp, func(i int) Op[string] {
-		return RunOp[string]{
-			run: func(runner Runner) (string, error) {
-				return "Should not be called", nil
-			},
-		}
+
+	stringOp := intOp.Map(func(i int) string {
+		return "Should not be called"
 	})
-	
+
 	runner := &mockOpRunner{}
 	_, err := stringOp.Run(runner)
-	
+
 	if err != expectedErr {
 		t.Errorf("Expected original error %v, got %v", expectedErr, err)
 	}
@@ -120,9 +106,9 @@ func TestRunOp_FlatMap(t *testing.T) {
 			return 5, nil
 		},
 	}
-	
+
 	// FlatMap it to another op that uses the int
-	stringOp := FlatMap(intOp, func(i int) Op[string] {
+	stringOp := intOp.FlatMap(func(i int) Op[string] {
 		return RunOp[string]{
 			run: func(runner Runner) (string, error) {
 				if i > 0 {
@@ -132,10 +118,10 @@ func TestRunOp_FlatMap(t *testing.T) {
 			},
 		}
 	})
-	
+
 	runner := &mockOpRunner{}
 	_, err := stringOp.Run(runner)
-	
+
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -149,9 +135,9 @@ func TestRunOp_FlatMapError(t *testing.T) {
 			return 0, expectedErr
 		},
 	}
-	
+
 	// FlatMap it - the function should not be called
-	stringOp := FlatMap(intOp, func(i int) Op[string] {
+	stringOp := intOp.FlatMap(func(i int) Op[string] {
 		t.Error("FlatMap function should not be called on error")
 		return RunOp[string]{
 			run: func(runner Runner) (string, error) {
@@ -159,10 +145,10 @@ func TestRunOp_FlatMapError(t *testing.T) {
 			},
 		}
 	})
-	
+
 	runner := &mockOpRunner{}
 	_, err := stringOp.Run(runner)
-	
+
 	if err != expectedErr {
 		t.Errorf("Expected original error %v, got %v", expectedErr, err)
 	}
@@ -175,44 +161,35 @@ func TestRunOp_FlatMapInnerError(t *testing.T) {
 			return 5, nil
 		},
 	}
-	
+
 	// FlatMap it to an op that fails
 	expectedErr := errors.New("inner error")
-	stringOp := FlatMap(intOp, func(i int) Op[string] {
+	stringOp := intOp.FlatMap(func(i int) Op[string] {
 		return RunOp[string]{
 			run: func(runner Runner) (string, error) {
 				return "", expectedErr
 			},
 		}
 	})
-	
+
 	runner := &mockOpRunner{}
 	_, err := stringOp.Run(runner)
-	
+
 	if err != expectedErr {
 		t.Errorf("Expected inner error %v, got %v", expectedErr, err)
 	}
 }
 
 func TestOp_Interface(t *testing.T) {
-	// Test that RunOp implements Op interface
-	var op Op[string]
-	
 	runOp := RunOp[string]{
 		run: func(runner Runner) (string, error) {
 			return "test", nil
 		},
 	}
-	
-	op = runOp
-	if op == nil {
-		t.Error("RunOp should implement Op interface")
-	}
-	
-	// Test that we can call interface methods
+
 	runner := &mockOpRunner{}
-	_, err := op.Run(runner)
-	
+	_, err := runOp.Run(runner)
+
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -225,16 +202,16 @@ func TestOp_Composition(t *testing.T) {
 			return 10, nil
 		},
 	}
-	
-	op2 := FlatMap(op1, func(i int) Op[int] {
+
+	op2 := op1.FlatMap(func(i int) Op[int] {
 		return RunOp[int]{
 			run: func(runner Runner) (int, error) {
 				return i * 2, nil
 			},
 		}
 	})
-	
-	op3 := FlatMap(op2, func(i int) Op[string] {
+
+	op3 := op2.FlatMap(func(i int) Op[string] {
 		return RunOp[string]{
 			run: func(runner Runner) (string, error) {
 				if i == 20 {
@@ -244,10 +221,10 @@ func TestOp_Composition(t *testing.T) {
 			},
 		}
 	})
-	
+
 	runner := &mockOpRunner{}
 	_, err := op3.Run(runner)
-	
+
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}

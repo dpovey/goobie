@@ -2,8 +2,8 @@ package sql
 
 import (
 	"database/sql"
+
 	"github.com/dpovey/goobie/pkg/goobie"
-	"reflect"
 )
 
 type Transactor struct {
@@ -50,10 +50,9 @@ func (t Transactor) Begin() (goobie.Transaction, error) {
 	return NewSqlTransaction(t.db, tx), nil
 }
 
-func (t Transactor) RunQuery(query goobie.QueryAny, strategy goobie.ResultStrategy, resultType reflect.Type) (any, error) {
-	fr := DatabaseSpecificTransforms(t.db, query.SQL())
-	rows, err := t.db.Query(fr.SQL, fr.Args...)
-	return mapQuery(query, strategy, err, rows, resultType)
+func (t Transactor) Query(fragment goobie.Fragment) (goobie.Rows, error) {
+	fr := DatabaseSpecificTransforms(t.db, fragment)
+	return t.db.Query(fr.SQL, fr.Args...)
 }
 
 func (t Transactor) RunUpdate(update goobie.UpdateT) (int64, error) {
@@ -69,7 +68,7 @@ func (t Transactor) RunUpdate(update goobie.UpdateT) (int64, error) {
 func (t *Transactor) RunUpdateMany(update goobie.UpdateT, params [][]any) (int64, error) {
 	fragment := goobie.Fragment{SQL: update.GetSQL(), Args: update.GetArgs()}
 	fr := DatabaseSpecificTransforms(t.db, fragment)
-	
+
 	// For batch operations, we prepare the SQL without initial args
 	// The args come from the params parameter
 	var r int64 = 0

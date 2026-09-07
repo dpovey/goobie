@@ -21,5 +21,10 @@ func SQLRowPull(rows *sql.Rows, chunkSize int) stream.NextChunk[*sql.Rows] {
 
 // NewSQLRowStream creates a Stream from SQL rows
 func NewSQLRowStream(rows *sql.Rows, chunkSize int) stream.Stream[*sql.Rows] {
-	return stream.New(SQLRowPull(rows, chunkSize))
+	return stream.FromNextChunkFuncWithClose(func(ctx context.Context) ([]*sql.Rows, bool, error) {
+		if !rows.Next() {
+			return nil, false, rows.Err()
+		}
+		return []*sql.Rows{rows}, true, nil
+	}, rows.Close)
 }

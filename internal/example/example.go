@@ -2,8 +2,9 @@ package example
 
 import (
 	"context"
+
 	"github.com/dpovey/goobie/pkg/goobie"
-	"github.com/dpovey/goobie/pkg/stream"
+	"github.com/dpovey/goobie/pkg/goobie/read"
 )
 
 var dropPerson = goobie.Update0(`
@@ -58,7 +59,10 @@ func ReadingRowsIntoSlices(xa goobie.Transactor) ([]string, error) {
 }
 
 func Streaming(xa goobie.Transactor) ([]string, error) {
-	s, _ := goobie.Query0[string]("SELECT name FROM country ORDER BY name").Stream().Run(xa)
+	s, err := goobie.Query0[string]("SELECT name FROM country ORDER BY name").Stream().Run(xa)
+	if err != nil {
+		return nil, err
+	}
 	return s.Take(5).Collect(context.Background())
 }
 
@@ -69,20 +73,40 @@ type Country struct {
 	Gnp  *float64
 }
 
+var countryRead = (read.Row4[string, string, int, *float64]{}).Map(
+	func(code string, name string, population int, gnp *float64) Country {
+		return Country{Code: code, Name: name, Pop: population, Gnp: gnp}
+	},
+)
+
+func countryQuery(sql string, args ...any) goobie.QueryT[Country] {
+	return goobie.QueryFrAndRead(goobie.Fr(sql, args...), countryRead)
+}
+
 func MultipleColumns(xa goobie.Transactor) ([]Country, error) {
-	s, _ := goobie.Query[Country]("SELECT code, name, population, Gnp FROM country ORDER BY code").Stream().Run(xa)
+	s, err := countryQuery(
+		"SELECT code, name, population, Gnp FROM country ORDER BY code",
+	).Stream().Run(xa)
+	if err != nil {
+		return nil, err
+	}
 	return s.Take(5).Collect(context.Background())
 }
 
 func MultipleColumnsToMap(xa goobie.Transactor) (map[string]Country, error) {
-	s, _ := goobie.Query[Country]("SELECT code, name, population, Gnp FROM country").Stream().Run(xa)
-	return stream.ToMap(s.Take(5), context.Background(), func(c Country) (string, Country) {
+	s, err := countryQuery(
+		"SELECT code, name, population, Gnp FROM country",
+	).Stream().Run(xa)
+	if err != nil {
+		return nil, err
+	}
+	return s.Take(5).ToMap(context.Background(), func(c Country) (string, Country) {
 		return c.Code, c
 	})
 }
 
 func CreatingPersonTables(xa goobie.Transactor) (int64, error) {
-	total, err := goobie.Map2[int64, int64, int64](dropPerson, createPerson)(func(a int64, b int64) int64 {
+	total, err := dropPerson.Op().Map2(createPerson.Op(), func(a int64, b int64) int64 {
 		return a + b
 	}).Run(xa)
 	if err != nil {
@@ -110,18 +134,16 @@ type PersonInfo struct {
 }
 
 func InsertingData(xa goobie.Transactor) ([]Person, error) {
-	// Note: outside a transaction
 	age := new(int)
 	*age = 12
-	_, err := insert1("Alice", age).Run(xa)
-	if err != nil {
-		return nil, err
-	}
-	_, err = insert1("Bob", nil).Run(xa)
-	if err != nil {
-		return nil, err
-	}
-	return goobie.Query[Person]("SELECT id, name, age FROM person").ToSlice().Run(xa)
+	return insert1("Alice", age).Op().
+		FlatMap(func(int64) goobie.Op[int64] {
+			return insert1("Bob", nil).Op()
+		}).
+		FlatMap(func(int64) goobie.Op[[]Person] {
+			return goobie.Query[Person]("SELECT id, name, age FROM person").ToSlice()
+		}).
+		Run(xa)
 }
 
 func UpdatingData(xa goobie.Transactor) (int64, error) {
@@ -136,17 +158,19 @@ func RetrievingResults(xa goobie.Transactor, name string, age int) (Person, erro
 		VALUES (?, ?)
 		`, name, age)
 	fetchId := goobie.Query0[int64](`SELECT lastval()`).Unique()
+	operation := insert.Op().
+		FlatMap(func(int64) goobie.Op[int64] {
+			return fetchId
+		}).
+		FlatMap(func(id int64) goobie.Op[Person] {
+			return goobie.Query[Person](
+				"SELECT id, name, age FROM person WHERE id = ?",
+				id,
+			).Unique()
+		})
 
 	err = xa.Transact(func(xa goobie.Transaction) error {
-		_, err = insert.Run(xa)
-		if err != nil {
-			return err
-		}
-		id, err := fetchId.Run(xa)
-		if err != nil {
-			return err
-		}
-		result, err = goobie.Query[Person]("SELECT id, name, age FROM person WHERE id = ?", id).Unique().Run(xa)
+		result, err = operation.Run(xa)
 		return err
 	})
 

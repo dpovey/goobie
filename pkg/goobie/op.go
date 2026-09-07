@@ -2,73 +2,92 @@ package goobie
 
 type RunFn[A any] func(Runner) (A, error)
 
-type RunOp[A any] struct {
+// Op represents a computation that requires a Runner and produces an A.
+type Op[A any] struct {
 	run RunFn[A]
 }
 
-func (q RunOp[A]) Run(runner Runner) (A, error) {
-	return q.run(runner)
-}
+// RunOp is retained as an alias for compatibility.
+type RunOp[A any] = Op[A]
 
-type Op[A any] interface {
-	Run(Runner) (A, error)
+func (op Op[A]) Run(runner Runner) (A, error) {
+	return op.run(runner)
 }
 
 func NewOp[A any](run RunFn[A]) Op[A] {
-	return RunOp[A]{run}
+	return Op[A]{run}
 }
 
 func ErrOp[A any](err error) Op[A] {
 	var zero A
-	return RunOp[A]{
+	return Op[A]{
 		run: func(Runner) (A, error) {
 			return zero, err
 		},
 	}
 }
 
-func FlatMap[A any, B any](op Op[A], f func(A) Op[B]) Op[B] {
-	return RunOp[B]{
+// Map transforms the successful result of op.
+func (op Op[A]) Map[B any](f func(A) B) Op[B] {
+	return Op[B]{
 		run: func(runner Runner) (B, error) {
 			result, err := op.Run(runner)
 			if err != nil {
-				return *new(B), err
+				var zero B
+				return zero, err
+			}
+			return f(result), nil
+		},
+	}
+}
+
+// FlatMap sequences op with an operation selected from its successful result.
+func (op Op[A]) FlatMap[B any](f func(A) Op[B]) Op[B] {
+	return Op[B]{
+		run: func(runner Runner) (B, error) {
+			result, err := op.Run(runner)
+			if err != nil {
+				var zero B
+				return zero, err
 			}
 			return f(result).Run(runner)
 		},
 	}
 }
 
-func MapN[A any](op ...Op[any]) func(f func(...any) A) Op[A] {
+// Map2 combines successful results from op and other.
+func (op Op[A]) Map2[B any, C any](other Op[B], f func(A, B) C) Op[C] {
+	return Op[C]{
+		run: func(runner Runner) (C, error) {
+			resultA, err := op.Run(runner)
+			if err != nil {
+				var zero C
+				return zero, err
+			}
+			resultB, err := other.Run(runner)
+			if err != nil {
+				var zero C
+				return zero, err
+			}
+			return f(resultA, resultB), nil
+		},
+	}
+}
+
+func MapN[A any](ops ...Op[any]) func(f func(...any) A) Op[A] {
 	return func(f func(...any) A) Op[A] {
-		return RunOp[A]{
+		return Op[A]{
 			run: func(runner Runner) (A, error) {
 				var results []any
-				for _, o := range op {
-					result, err := o.Run(runner)
+				for _, op := range ops {
+					result, err := op.Run(runner)
 					if err != nil {
-						return *new(A), err
+						var zero A
+						return zero, err
 					}
 					results = append(results, result)
 				}
 				return f(results...), nil
-			},
-		}
-	}
-}
-func Map2[A any, B any, C any](opA Op[A], opB Op[B]) func(f func(A, B) C) Op[C] {
-	return func(f func(A, B) C) Op[C] {
-		return RunOp[C]{
-			run: func(runner Runner) (C, error) {
-				resultA, err := opA.Run(runner)
-				if err != nil {
-					return *new(C), err
-				}
-				resultB, err := opB.Run(runner)
-				if err != nil {
-					return *new(C), err
-				}
-				return f(resultA, resultB), nil
 			},
 		}
 	}
